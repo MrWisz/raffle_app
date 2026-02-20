@@ -67,8 +67,8 @@ class ImageEditor:
         tk.Label(side_frame, text="Rango Rifa:", font=("Arial", 9, "bold")).pack(pady=(10,0))
         range_frame = tk.Frame(side_frame)
         range_frame.pack()
-        self.ent_min = tk.Entry(range_frame, width=5); self.ent_min.insert(0, "0"); self.ent_min.grid(row=0, column=1)
-        self.ent_max = tk.Entry(range_frame, width=5); self.ent_max.insert(0, "99"); self.ent_max.grid(row=1, column=1)
+        self.ent_min = tk.Entry(range_frame, width=5); self.ent_min.insert(0, "1"); self.ent_min.grid(row=0, column=1)
+        self.ent_max = tk.Entry(range_frame, width=5); self.ent_max.insert(0, "50"); self.ent_max.grid(row=1, column=1)
 
         tk.Label(side_frame, text="Marcar (Ej: 1,2 o 5-10):", font=("Arial", 8, "bold")).pack(pady=(15,0))
         self.ent_num = tk.Entry(side_frame, width=15, font=("Arial", 11), validate='key', validatecommand=vcmd)
@@ -93,14 +93,31 @@ class ImageEditor:
     def validate_input_format(self, char):
         return char.isdigit() or char in ",-"
 
+    def get_grid_dimensions(self):
+        try:
+            r_min = int(self.ent_min.get())
+            r_max = int(self.ent_max.get())
+            total = (r_max - r_min) + 1
+            cols = 10
+            rows = (total + cols - 1) // cols
+            return rows, cols
+        except:
+            return 10, 10
+
+    def calculate_snap_dynamic(self, x, y, rows, cols):
+        x1, y1, x2, y2 = self.grid_rect
+        if x1 <= x <= x2 and y1 <= y <= y2:
+            col = int((x - x1) / ((x2 - x1) / cols))
+            row = int((y - y1) / ((y2 - y1) / rows))
+            return min(row, rows-1), min(col, cols-1)
+        return None
+
     def process_input_request(self):
         if not self.grid_rect:
-            messagebox.showwarning("Aviso", "Calibra la cuadrícula primero.")
+            messagebox.showwarning("Aviso", "Calibra la cuadrícula primero.", parent=self.root)
             return
-
         raw_val = self.ent_num.get().strip()
         if not raw_val: return
-
         nums_to_mark = set()
         try:
             parts = raw_val.split(',')
@@ -110,26 +127,22 @@ class ImageEditor:
                     nums_to_mark.update(range(int(start_str), int(end_str) + 1))
                 else:
                     nums_to_mark.add(int(part))
-            
             r_min, r_max = int(self.ent_min.get()), int(self.ent_max.get())
             valid_nums = [n for n in nums_to_mark if r_min <= n <= r_max and n not in self.raffle_data]
-            
             if not valid_nums:
-                messagebox.showinfo("Aviso", "Números no válidos o ya marcados.")
+                messagebox.showinfo("Aviso", "Números no válidos o ya marcados.", parent=self.root)
                 return
-
-            name = simpledialog.askstring("Comprador", f"¿Nombre para estos {len(valid_nums)} números?")
+            name = simpledialog.askstring("Comprador", f"¿Nombre para estos {len(valid_nums)} números?", parent=self.root)
             if not name: return
-
             self.save_history_state()
             for n in valid_nums:
                 self.mark_logic(n, name)
             
+            # Limpiar input tras éxito
             self.ent_num.delete(0, tk.END)
             self.update_display_after_batch()
-
         except Exception:
-            messagebox.showerror("Error", "Formato inválido. Usa ej: 1,2,5-10")
+            messagebox.showerror("Error", "Formato inválido. Usa ej: 1,2,5-10", parent=self.root)
 
     def handle_click(self, event):
         if not self.original_image: return
@@ -141,34 +154,52 @@ class ImageEditor:
                 self.calibrating = False
                 self.status_label.config(text="Calibración lista.", fg="green")
             return
-        
         if self.grid_rect:
-            res = core.calculate_snap(event.x, event.y, self.grid_rect)
+            rows, cols = self.get_grid_dimensions()
+            res = self.calculate_snap_dynamic(event.x, event.y, rows, cols)
             if res:
-                start = int(self.ent_min.get())
-                num = start + (res[2] * 10) + res[3]
+                row, col = res
+                num = int(self.ent_min.get()) + (row * cols) + col
                 
+                # --- Lógica de ELIMINACIÓN ---
                 if num in self.raffle_data:
-                    messagebox.showinfo("Vendido", f"El {num} ya es de: {self.raffle_data[num]}")
+                    msg = f"El número {num} ya pertenece a: {self.raffle_data[num]}\n\n¿Deseas eliminar esta marca?"
+                    confirm = messagebox.askyesno("Número Ocupado", msg, parent=self.root)
+                    if confirm:
+                        self.save_history_state()
+                        del self.raffle_data[num]
+                        self.rebuild_image_from_data()
+                        self.update_display()
                     return
                 
-                name = simpledialog.askstring("Comprador", f"¿Nombre para el número {num}?")
+                # --- Lógica de MARCADO ---
+                name = simpledialog.askstring("Comprador", f"¿Nombre para el número {num}?", parent=self.root)
                 if name:
                     self.save_history_state()
                     self.mark_logic(num, name)
+                    # Limpiar input si había algo escrito manualmente
+                    self.ent_num.delete(0, tk.END)
                     self.update_display_after_batch()
+
+    def rebuild_image_from_data(self):
+        """Restaura la imagen original y vuelve a dibujar todas las marcas vigentes."""
+        self.original_image = self.clean_image.copy()
+        current_data = dict(self.raffle_data)
+        self.raffle_data = {} 
+        for n, name in current_data.items():
+            self.mark_logic(n, name)
 
     def mark_logic(self, num, name):
         start = int(self.ent_min.get())
+        rows, cols = self.get_grid_dimensions()
         idx = num - start
-        row, col = idx // 10, idx % 10
-        
+        row, col = idx // cols, idx % cols
         x_start, y_start, x_end, y_end = self.grid_rect
-        cell_w, cell_h = (x_end - x_start) / 10, (y_end - y_start) / 10
+        cell_w, cell_h = (x_end - x_start) / cols, (y_end - y_start) / rows
         dx = x_start + (col + 0.5) * cell_w
         dy = y_start + (row + 0.5) * cell_h
-
-        s, t = 10, 4
+        s, t = 10, 5
+        
         self.canvas.create_line(dx-s, dy-s, dx+s, dy+s, fill=self.current_color, width=t, tags="mark")
         self.canvas.create_line(dx-s, dy+s, dx+s, dy-s, fill=self.current_color, width=t, tags="mark")
         
@@ -182,20 +213,16 @@ class ImageEditor:
 
     def handle_hover(self, event):
         if not self.grid_rect: return
-        
-        res = core.calculate_snap(event.x, event.y, self.grid_rect)
+        rows, cols = self.get_grid_dimensions()
+        res = self.calculate_snap_dynamic(event.x, event.y, rows, cols)
         self.canvas.delete("hover_highlight")
-        
         if res:
-            start = int(self.ent_min.get())
-            num = start + (res[2] * 10) + res[3]
-            
+            row, col = res
+            num = int(self.ent_min.get()) + (row * cols) + col
             x_start, y_start, x_end, y_end = self.grid_rect
-            cw, ch = (x_end - x_start) / 10, (y_end - y_start) / 10
-            x0 = x_start + (res[3] * cw)
-            y0 = y_start + (res[2] * ch)
+            cw, ch = (x_end - x_start) / cols, (y_end - y_start) / rows
+            x0, y0 = x_start + (col * cw), y_start + (row * ch)
             self.canvas.create_rectangle(x0, y0, x0+cw, y0+ch, outline="cyan", width=2, tags="hover_highlight")
-
             if num in self.raffle_data:
                 self.tooltip.config(text=f" Número {num}: {self.raffle_data[num]} ")
                 tx = event.x_root - self.root.winfo_rootx() + 15
@@ -203,7 +230,6 @@ class ImageEditor:
                 self.tooltip.place(x=tx, y=ty)
                 self.tooltip.lift()
                 return
-                
         self.hide_tooltip()
 
     def hide_tooltip(self):
@@ -211,40 +237,34 @@ class ImageEditor:
         self.canvas.delete("hover_highlight")
 
     def perform_save_logic(self, fp):
-        """Lógica centralizada para guardar .rifa y .json"""
         try:
-            # Guardar archivo de proyecto (.rifa)
             core.save_project_file(fp, self.original_image, self.clean_image, self.grid_rect, self.raffle_data)
-            
-            # Generar ruta y guardar JSON automáticamente
             json_fp = os.path.splitext(fp)[0] + ".json"
             sorted_data = {str(k): self.raffle_data[k] for k in sorted(self.raffle_data.keys())}
             with open(json_fp, 'w', encoding='utf-8') as f:
                 json.dump(sorted_data, f, indent=4, ensure_ascii=False)
-            
             self.unsaved_changes = False
             return True
         except Exception as e:
-            messagebox.showerror("Error", f"No se pudo guardar: {e}")
+            messagebox.showerror("Error", f"No se pudo guardar: {e}", parent=self.root)
             return False
 
     def save_project(self):
-        fp = filedialog.asksaveasfilename(defaultextension=".rifa", filetypes=[("Proyecto", "*.rifa")])
+        fp = filedialog.asksaveasfilename(defaultextension=".rifa", filetypes=[("Proyecto", "*.rifa")], parent=self.root)
         if fp:
             if self.perform_save_logic(fp):
-                messagebox.showinfo("Éxito", "Proyecto y lista JSON guardados.")
+                messagebox.showinfo("Éxito", "Proyecto y lista JSON guardados.", parent=self.root)
 
     def export_to_json(self):
-        """Exportación manual si solo se desea el JSON"""
         if not self.raffle_data:
-            messagebox.showwarning("Vacio", "No hay datos para exportar.")
+            messagebox.showwarning("Vacio", "No hay datos para exportar.", parent=self.root)
             return
-        fp = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        fp = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")], parent=self.root)
         if fp:
             sorted_data = {str(k): self.raffle_data[k] for k in sorted(self.raffle_data.keys())}
             with open(fp, 'w', encoding='utf-8') as f:
                 json.dump(sorted_data, f, indent=4, ensure_ascii=False)
-            messagebox.showinfo("Éxito", "JSON exportado.")
+            messagebox.showinfo("Éxito", "JSON exportado.", parent=self.root)
 
     def save_history_state(self):
         self.image_history.append((self.original_image.copy(), dict(self.raffle_data)))
@@ -282,7 +302,7 @@ class ImageEditor:
         self.sales_counter.config(text=str(len(self.raffle_data)))
 
     def open_image(self):
-        fp = filedialog.askopenfilename(filetypes=[("Imágenes", "*.png *.jpg *.jpeg")])
+        fp = filedialog.askopenfilename(filetypes=[("Imágenes", "*.png *.jpg *.jpeg")], parent=self.root)
         if fp:
             self.original_image = Image.open(fp).convert("RGBA")
             self.clean_image = self.original_image.copy()
@@ -290,7 +310,7 @@ class ImageEditor:
             self.update_display()
 
     def load_project(self):
-        fp = filedialog.askopenfilename(filetypes=[("Proyecto", "*.rifa")])
+        fp = filedialog.askopenfilename(filetypes=[("Proyecto", "*.rifa")], parent=self.root)
         if fp:
             data = core.load_project_file(fp)
             self.original_image = data["image"]
@@ -301,7 +321,7 @@ class ImageEditor:
             self.update_display()
 
     def clear_all(self):
-        if messagebox.askyesno("Limpiar", "¿Borrar todas las ventas?"):
+        if messagebox.askyesno("Limpiar", "¿Borrar todas las ventas?", parent=self.root):
             self.original_image = self.clean_image.copy()
             self.raffle_data = {}; self.image_history = []
             self.update_display()
@@ -311,20 +331,19 @@ class ImageEditor:
         self.status_label.config(text="Calibrando: Clic en Sup-Izq y luego Inf-Der", fg="red")
 
     def save_image(self):
-        fp = filedialog.asksaveasfilename(defaultextension=".png")
+        fp = filedialog.asksaveasfilename(defaultextension=".png", parent=self.root)
         if fp: self.original_image.save(fp)
 
     def on_closing(self):
-        """Actualizado: Si hay cambios, permite guardar ambos formatos antes de salir"""
         if self.unsaved_changes:
-            ans = messagebox.askyesnocancel("Salir", "¿Deseas guardar los cambios antes de salir?")
-            if ans is True: # El usuario eligió GUARDAR
-                fp = filedialog.asksaveasfilename(defaultextension=".rifa", filetypes=[("Proyecto", "*.rifa")])
+            ans = messagebox.askyesnocancel("Salir", "¿Deseas guardar los cambios antes de salir?", parent=self.root)
+            if ans is True: 
+                fp = filedialog.asksaveasfilename(defaultextension=".rifa", filetypes=[("Proyecto", "*.rifa")], parent=self.root)
                 if fp and self.perform_save_logic(fp):
                     self.root.destroy()
-            elif ans is False: # El usuario eligió NO GUARDAR
+            elif ans is False: 
                 self.root.destroy()
         else:
             self.root.destroy()
 
-    def validate_only_numbers(self, char): return char.isdigit()
+    def validate_input_format(self, char): return char.isdigit() or char in ",-"
